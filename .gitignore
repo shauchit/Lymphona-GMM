@@ -1,0 +1,16 @@
+# Datasets — downloaded via scripts/download_data.py, not committed
+/data/
+
+# Pipeline / demo outputs
+util_demo_output/
+graph_construction_output/
+*.pt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
