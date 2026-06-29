@@ -316,13 +316,42 @@ util/
 ## Next steps
 
 CV ruled out the model side (depth, pooling) and pointed upstream. Two upstream
-changes have now landed: **StarDist nuclei** (0.54 → 0.61) and **richer 18-dim
-features** (0.61 → **0.68**, macro-F1 0.66). Where to go next:
+changes landed: **StarDist nuclei** (0.54 → 0.61) and **richer 18-dim features**
+(0.61 → **0.68**, macro-F1 0.66). Current best: **18-dim StarDist cell-graph**.
 
-- **MCL is now the weakest class** (F1 0.54, recall 0.47). Add features that
-  separate it from CLL — neighbourhood/architecture statistics (local nucleus
-  density, graph-context), GLCM/Haralick chromatin texture, eosin channel.
-- Add **edge features/weights** (e.g. inverse centroid distance) to the GAT.
-- Compare the **patch-graph** strategy against the StarDist cell-graph (same CV).
-- Light hyper-parameter tuning, evaluated against the **CV** estimate (not a
-  single split).
+**MCL is the weakest class (recall ~0.47) and per-nucleus features have hit a
+ceiling for it.** Two MCL-targeted feature additions were tried under CV and
+neither helped (both reverted):
+
+| Attempt | Macro-F1 | MCL recall | Verdict |
+|---------|----------|------------|---------|
+| 18-dim baseline | 0.659 | 0.467 | — |
+| + spacing/density + eosin (23-dim) | 0.653 | 0.484 | wash (lower variance only) |
+| + GLCM chromatin texture (22-dim) | 0.638 | 0.484 | slightly worse |
+
+Both only *redistributed* MCL's errors (less MCL→CLL, more MCL→FL) without
+raising recall. The signal that defines MCL is likely **higher-order tissue
+architecture** (mantle-zone pattern), not single-nucleus appearance.
+
+### Promising directions (ranked)
+
+The lesson from every experiment so far: gains come from giving the model access
+to **better/structural information**, not from tuning the model. So, most to
+least promising:
+
+1. **Hierarchical / attention pooling** (`SAGPool`, `DiffPool`, or `mean+max`
+   over learned clusters) instead of a single global mean. Lets the readout see
+   tissue-level structure rather than an averaged node — directly targets the
+   architectural signal MCL needs. *Highest expected payoff.*
+2. **Patch-graph vs cell-graph under the same CV.** Patch-graphs encode tissue
+   regions (stroma/follicles) rather than individual nuclei, so they may carry
+   architecture the cell-graph misses. Cheap to try — the builder already exists.
+3. **Edge features / weights** (e.g. inverse centroid distance, or relative
+   angle) so message passing is geometry-aware, not just topological.
+4. **Stronger node backbone**: features from a pretrained pathology encoder
+   (e.g. UNI / CONCH tile embeddings) in place of hand-crafted descriptors.
+
+Ground rules that held up: always judge against the **CV** estimate (never a
+single split), and only adopt a change that **clearly** beats the baseline —
+depth, pooling, and the two MCL feature attempts were all reverted for failing
+that bar.
