@@ -167,7 +167,8 @@ The model lives in `models/gat.py` and is importable:
 
 ```python
 from models import GATGraphClassifier
-model = GATGraphClassifier(in_channels=10, num_classes=3, heads=4, num_layers=4)
+# in_channels must match the graphs (18 for StarDist cell-graphs, 10 for patch)
+model = GATGraphClassifier(in_channels=18, num_classes=3, heads=4, num_layers=4)
 ```
 
 > **Tip:** on Apple Silicon, prefer `--device cpu`. These graphs are tiny
@@ -201,20 +202,24 @@ trades CLL recall against MCL recall without a net gain. Default stays `mean`.
 The remaining bottleneck is upstream — the **node features / graph construction**
 don't carry enough signal to separate CLL from MCL.
 
-**StarDist nuclei — the change that worked** (same CV config, graphs from
-`lymphoma_cell_stardist.pt`): replacing watershed with StarDist nuclei (~1700 vs
-~180 nuclei/image) lifts accuracy **0.543 → 0.612** and macro-F1 **0.479 →
-0.583**. The gain is exactly where CV said the problem was — CLL↔MCL:
+**What actually moved the needle — better nuclei + richer features.** The model
+side (depth, pooling) did nothing; the two upstream changes both helped, exactly
+where CV said the problem was (CLL/MCL):
 
-| Nuclei | Accuracy | Macro-F1 | CLL-F1 | FL-F1 | MCL-F1 |
-|--------|----------|----------|--------|-------|--------|
-| watershed | 0.543 ± 0.013 | 0.479 | 0.436 | 0.720 | 0.332 |
-| **StarDist** | **0.612 ± 0.063** | **0.583** | **0.518** | 0.706 | **0.562** |
+| Cell-graph variant | Accuracy | Macro-F1 | CLL-F1 | FL-F1 | MCL-F1 |
+|--------------------|----------|----------|--------|-------|--------|
+| watershed, 10-dim | 0.543 ± 0.013 | 0.479 | 0.436 | 0.720 | 0.332 |
+| StarDist, 10-dim | 0.612 ± 0.063 | 0.583 | 0.518 | 0.706 | 0.562 |
+| **StarDist, 18-dim** | **0.679 ± 0.043** | **0.659** | **0.642** | **0.808** | 0.543 |
 
-MCL F1 nearly doubles (0.33 → 0.56) and the FL bias eases. This confirms the
-CV-driven diagnosis: **better nuclei, not a bigger/deeper model, is what moved
-the needle.** (StarDist's per-fold variance is higher, ±0.063, so the exact
-number is noisier — but the central improvement is real and consistent.)
+1. **StarDist nuclei** (~1700 vs ~180/image) lifted accuracy 0.54 → 0.61.
+2. **Richer per-nucleus features** (10 → 18 dims: + minor/major axis & ratio,
+   RGB std, and **haematoxylin mean/std** for chromatin density/texture) lifted
+   it again to **0.68**, with macro-F1 0.58 → 0.66 *and lower variance*
+   (±0.063 → ±0.043). CLL-F1 jumped 0.52 → 0.64; MCL is now the weakest class.
+
+This confirms the CV-driven diagnosis: **better nuclei and features, not a
+bigger/deeper model, is what works.**
 
 ```bash
 uv run python scripts/cross_validate.py \
@@ -232,9 +237,9 @@ you build the GNN.
 from util import load_image, build_cell_graph, build_patch_graph
 
 rgb = load_image("data/lymphoma/CLL/sj-03-2810_001.tif")
-data, stats = build_cell_graph(rgb, label_y=0)
+data, stats = build_cell_graph(rgb, label_y=0)   # watershed; method="stardist" too
 
-data.x          # [N, 10] node features
+data.x          # [N, 18] node features (cell-graph)
 data.edge_index # [2, 2E] bidirectional edges
 data.y          # [1]     graph-level label
 data.pos        # [N, 2]  node (row, col) coordinates
@@ -259,12 +264,12 @@ process_dataset(
 |--|----------------|-----------------|
 | Nodes | individual nuclei (StarDist two-stage, or in-process watershed) | SLIC superpixels (~150) |
 | Edges | Delaunay triangulation, pruned at 150 px | k-NN (k=6) on centroids |
-| Features (10-dim) | morphology + mean RGB | colour mean/std + LBP texture + luminance |
+| Features | **18-dim**: shape (area, axes, eccentricity, solidity, …), colour mean/std, haematoxylin mean/std (chromatin) | 10-dim: colour mean/std + LBP texture + luminance |
 
-> **Note:** both strategies emit 10-dim node features, so a GNN uses
-> `in_channels=10` — but the two feature spaces are **not** interchangeable
-> (cell = morphology, patch = colour/texture). Don't mix graphs from the two
-> strategies in one model.
+> **Note:** cell-graphs use **18-dim** node features, patch-graphs **10-dim**;
+> the GNN reads the width from the data (`in_channels = graphs[0].x.shape[1]`),
+> so no manual config is needed. The two feature spaces are **not**
+> interchangeable — don't mix graphs from the two strategies in one model.
 
 ### Visual inspection / demo
 
@@ -310,14 +315,14 @@ util/
 
 ## Next steps
 
-CV ruled out the model side (depth, pooling) and pointed upstream — and
-switching watershed → **StarDist nuclei confirmed it** (accuracy 0.54 → 0.61,
-MCL-F1 0.33 → 0.56). Build on that:
+CV ruled out the model side (depth, pooling) and pointed upstream. Two upstream
+changes have now landed: **StarDist nuclei** (0.54 → 0.61) and **richer 18-dim
+features** (0.61 → **0.68**, macro-F1 0.66). Where to go next:
 
-- **Richer per-nucleus features** now that nuclei are accurate: chromatin/texture
-  descriptors, neighbourhood statistics — rebuild the StarDist cache and re-run CV.
-- **Reduce StarDist fold variance** (±0.063): more folds / repeated CV, or light
-  regularisation tuning, to firm up the estimate.
+- **MCL is now the weakest class** (F1 0.54, recall 0.47). Add features that
+  separate it from CLL — neighbourhood/architecture statistics (local nucleus
+  density, graph-context), GLCM/Haralick chromatin texture, eosin channel.
 - Add **edge features/weights** (e.g. inverse centroid distance) to the GAT.
 - Compare the **patch-graph** strategy against the StarDist cell-graph (same CV).
-- Always evaluate against the **CV** estimate, never a single split.
+- Light hyper-parameter tuning, evaluated against the **CV** estimate (not a
+  single split).

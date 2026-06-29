@@ -26,8 +26,13 @@ from skimage import color, filters, measure, morphology, segmentation
 
 warnings.filterwarnings("ignore")
 
-FEATURE_DIM = 10
+FEATURE_DIM = 18
 MIN_NUCLEUS_AREA = 20   # skip regions smaller than this (px²)
+
+# Columns that are scale-variant (raw pixel/length units) and get per-image
+# min-max normalised so they sit in [0,1] like the rest. The remaining columns
+# are already intrinsically bounded (ratios, [0,1] colour, orientation).
+_NORM_COLS = [0, 3, 10, 11, 16, 17]   # area, perim, major/minor axis, hema mean/std
 
 
 def load_image(path: str | Path) -> np.ndarray:
@@ -106,17 +111,29 @@ def extract_cell_features(
     rgb: np.ndarray, labels: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    For each labelled nucleus compute a 10-dim feature vector.
+    For each labelled nucleus compute an 18-dim feature vector.
 
-    Features:
-      0 area (normalised)   1 eccentricity   2 solidity   3 perimeter (norm.)
-      4 compactness         5 orientation    6 extent     7-9 mean R/G/B
+    Shape (0-6, 10-12):
+      0 area            1 eccentricity   2 solidity      3 perimeter
+      4 compactness     5 orientation    6 extent
+      10 major axis     11 minor axis    12 axis ratio (minor/major)
+    Colour (7-9, 13-15):
+      7-9   mean R/G/B          13-15 std R/G/B (colour heterogeneity)
+    Chromatin / texture (16-17):
+      16 mean haematoxylin (rgb2hed H — DNA/chromatin density)
+      17 std  haematoxylin (chromatin texture / heterogeneity)
+
+    Scale-variant columns (_NORM_COLS) are min-max normalised per image; the
+    rest are already bounded.
 
     Returns
     -------
     centroids : (N, 2) float  [row, col]
-    features  : (N, 10) float32
+    features  : (N, 18) float32
     """
+    # Precompute whole-image stain channels once (cheap vs per-nucleus).
+    hema = color.rgb2hed(rgb)[:, :, 0]          # haematoxylin optical density
+
     props = measure.regionprops(labels, intensity_image=rgb)
     centroids, feats = [], []
     for p in props:
@@ -126,12 +143,18 @@ def extract_cell_features(
         area    = p.area
         perim   = max(p.perimeter, 1e-6)
         compact = (4 * np.pi * area) / (perim ** 2)
+        major   = p.major_axis_length
+        minor   = p.minor_axis_length
+        axis_ratio = minor / (major + 1e-6)
+
         minr, minc, maxr, maxc = p.bbox
         patch_rgb = rgb[minr:maxr, minc:maxc]
         mask_roi  = labels[minr:maxr, minc:maxc] == p.label
-        r_vals    = patch_rgb[:, :, 0][mask_roi]
-        g_vals    = patch_rgb[:, :, 1][mask_roi]
-        b_vals    = patch_rgb[:, :, 2][mask_roi]
+        r_vals    = patch_rgb[:, :, 0][mask_roi].astype(np.float32)
+        g_vals    = patch_rgb[:, :, 1][mask_roi].astype(np.float32)
+        b_vals    = patch_rgb[:, :, 2][mask_roi].astype(np.float32)
+        hema_vals = hema[minr:maxr, minc:maxc][mask_roi]
+
         feat = np.array([
             area,
             p.eccentricity,
@@ -143,6 +166,14 @@ def extract_cell_features(
             r_vals.mean() / 255.0,
             g_vals.mean() / 255.0,
             b_vals.mean() / 255.0,
+            major,
+            minor,
+            axis_ratio,
+            r_vals.std() / 255.0,
+            g_vals.std() / 255.0,
+            b_vals.std() / 255.0,
+            hema_vals.mean(),
+            hema_vals.std(),
         ], dtype=np.float32)
         centroids.append([cy, cx])
         feats.append(feat)
@@ -150,7 +181,7 @@ def extract_cell_features(
     centroids = np.array(centroids, dtype=np.float32).reshape(-1, 2)
     feats     = np.array(feats,     dtype=np.float32).reshape(-1, FEATURE_DIM)
     if len(feats):
-        feats[:, :7] = _safe_norm(feats[:, :7])   # normalise geometric cols
+        feats[:, _NORM_COLS] = _safe_norm(feats[:, _NORM_COLS])
     return centroids, feats
 
 
@@ -158,7 +189,7 @@ def detect_nuclei(
     rgb: np.ndarray, method: str = "stardist"
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Detect nuclei and return (centroids[N,2], features[N,10]).
+    Detect nuclei and return (centroids[N,2], features[N,18]).
 
     method:
       "stardist"  — StarDist 2D_versatile_he (torch-free process only); falls

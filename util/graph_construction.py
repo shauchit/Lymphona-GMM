@@ -56,7 +56,8 @@ SLIC_COMPACTNESS           = 20    # shape vs colour trade-off
 KNN_K                      = 6     # neighbours in patch-graph
 LBP_RADIUS                 = 3
 LBP_N_POINTS               = 8 * LBP_RADIUS
-# FEATURE_DIM (=10) is imported from .nuclei and shared by both strategies.
+# FEATURE_DIM is the cell-graph node-feature width, imported from .nuclei
+# (currently 18). Patch-graph features are a separate 10-dim set.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -291,7 +292,7 @@ def build_patch_graph(
         num_nodes         = N,
         num_edges         = edge_index.shape[1] // 2,
         avg_degree        = (edge_index.shape[1] / N) if N > 0 else 0.0,
-        node_feature_dim  = FEATURE_DIM,
+        node_feature_dim  = feats.shape[1] if feats.ndim == 2 else 0,
         construction_time = time.perf_counter() - t0,
         image_shape       = rgb.shape[:2],
     )

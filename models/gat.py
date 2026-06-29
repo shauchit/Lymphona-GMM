@@ -14,7 +14,7 @@ To make extra depth actually help we keep every block at the same width
 (hidden*heads), add a **residual** connection across each hidden block, and
 **BatchNorm** between layers to stabilise training.
 
-Input graphs carry 10-dim node features (``FEATURE_DIM``); the graph-level
+Input feature width is read from the data (``in_channels``); the graph-level
 label lives in ``data.y``.
 """
 
