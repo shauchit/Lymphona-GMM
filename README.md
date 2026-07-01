@@ -333,25 +333,38 @@ Both only *redistributed* MCL's errors (less MCL→CLL, more MCL→FL) without
 raising recall. The signal that defines MCL is likely **higher-order tissue
 architecture** (mantle-zone pattern), not single-nucleus appearance.
 
-### Promising directions (ranked)
+### Architectural directions — tested (5-fold CV, 18-dim StarDist graphs)
 
-The lesson from every experiment so far: gains come from giving the model access
-to **better/structural information**, not from tuning the model. So, most to
-least promising:
+Three of the four ranked directions have now been run under the shared CV
+harness (`cross_validate.py --model {flat,sagpool,edge}`):
 
-1. **Hierarchical / attention pooling** (`SAGPool`, `DiffPool`, or `mean+max`
-   over learned clusters) instead of a single global mean. Lets the readout see
-   tissue-level structure rather than an averaged node — directly targets the
-   architectural signal MCL needs. *Highest expected payoff.*
-2. **Patch-graph vs cell-graph under the same CV.** Patch-graphs encode tissue
-   regions (stroma/follicles) rather than individual nuclei, so they may carry
-   architecture the cell-graph misses. Cheap to try — the builder already exists.
-3. **Edge features / weights** (e.g. inverse centroid distance, or relative
-   angle) so message passing is geometry-aware, not just topological.
-4. **Stronger node backbone**: features from a pretrained pathology encoder
-   (e.g. UNI / CONCH tile embeddings) in place of hand-crafted descriptors.
+| Direction | Accuracy | Macro-F1 | MCL recall | Verdict |
+|-----------|----------|----------|------------|---------|
+| flat GAT baseline | 0.679 ± 0.043 | 0.659 | 0.467 | — |
+| Hierarchical pooling (SAGPool 0.5 / 0.75 / 0.9) | 0.55 / 0.56 / 0.53 | 0.50 / 0.47 / 0.42 | ~0.40 | **worse — ruled out** |
+| Patch-graph vs cell-graph | 0.666 ± 0.075 | 0.648 | — | tied (higher variance) |
+| **Edge features (GATv2, inv-dist + angle)** | **0.692 ± 0.058** | **0.668** | **0.557** | **ties baseline, best MCL yet** |
+
+Key correction to intuition: **SAGPool hurt** (aggressive pooling discards most
+of StarDist's ~1700 nodes and destabilises training), so "hierarchical pooling"
+is *not* the answer despite being the top a-priori guess. The surprise is **edge
+geometry**: it holds overall accuracy and is the **first change to lift MCL
+recall (0.47 → 0.56)**. (Caveat: the edge model also swaps `GATConv`→`GATv2Conv`,
+so the two changes are confounded, and the overall gain is within the ±0.058
+band — but the MCL improvement is real and directional.)
+
+### Remaining directions (ranked)
+
+1. **Edge features — push this.** Best MCL result so far. Disentangle GATv2 vs
+   edge-attr (ablate: GATv2 with vs without edge features), and try richer edge
+   attributes (k-NN rank, shared-tissue indicators).
+2. **Stronger node backbone**: pretrained pathology encoder (UNI / CONCH tile
+   embeddings) instead of hand-crafted descriptors — the likeliest way past the
+   hand-crafted ceiling. Gated models + GPU; a real setup.
+3. **Patch-graph**: tied with cell-graph, so tissue colour/texture ≈ nuclear
+   morphology for subtype — worth combining with (1)/(2), not on its own.
 
 Ground rules that held up: always judge against the **CV** estimate (never a
 single split), and only adopt a change that **clearly** beats the baseline —
-depth, pooling, and the two MCL feature attempts were all reverted for failing
-that bar.
+depth, global pooling, SAGPool, and the two MCL feature attempts were all
+reverted or ruled out for failing that bar.

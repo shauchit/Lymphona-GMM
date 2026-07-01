@@ -9,16 +9,34 @@ single-split trainer (scripts/train_gnn.py) and the k-fold cross-validator
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import nn
 from torch_geometric.loader import DataLoader
 
 from .gat import GATGraphClassifier
 
 CLASS_NAMES = ["CLL", "FL", "MCL"]
+
+
+def attach_edge_features(graphs: List) -> None:
+    """Add data.edge_attr = [inv_dist, cos, sin] of each edge, from node `pos`.
+
+    Requires graphs to still carry `pos` (load with strip_pos=False).
+    """
+    for g in graphs:
+        E = g.edge_index.shape[1]
+        if E == 0 or getattr(g, "pos", None) is None:
+            g.edge_attr = torch.zeros((E, 3), dtype=torch.float)
+            continue
+        src, dst = g.edge_index
+        d = g.pos[dst] - g.pos[src]                 # (E, 2)
+        dist = d.norm(dim=1, keepdim=True)
+        unit = d / (dist + 1e-6)
+        g.edge_attr = torch.cat([1.0 / (1.0 + dist), unit], dim=1).float()  # (E, 3)
 
 
 def get_device() -> torch.device:
@@ -30,17 +48,22 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def load_graphs(path: str | Path, verbose: bool = True) -> List:
-    """Load the first available *_graphs list from a build_graphs .pt file."""
+def load_graphs(path: str | Path, verbose: bool = True, strip_pos: bool = True) -> List:
+    """Load the first available *_graphs list from a build_graphs .pt file.
+
+    strip_pos: drop `pos` (default). Pass False to keep node positions, e.g. for
+    edge-feature models that derive edge_attr from `pos`.
+    """
     blob = torch.load(path, weights_only=False)
     for key in ("cell_graphs", "patch_graphs"):
         if key in blob and blob[key]:
             graphs = blob[key]
-            # `pos` is unused by the model and is missing on degenerate graphs
-            # (<3 nuclei) — drop it so PyG can batch a consistent attribute set.
-            for g in graphs:
-                if "pos" in g:
-                    del g.pos
+            if strip_pos:
+                # `pos` is unused by most models and is missing on some degenerate
+                # graphs — drop it so PyG can batch a consistent attribute set.
+                for g in graphs:
+                    if "pos" in g:
+                        del g.pos
             if verbose:
                 print(f"Loaded {len(graphs)} graphs from '{key}' in {path}")
             return graphs
@@ -66,7 +89,7 @@ def evaluate(model, loader, device) -> Tuple[float, np.ndarray, np.ndarray]:
     preds, trues = [], []
     for batch in loader:
         batch = batch.to(device)
-        logits = model(batch.x, batch.edge_index, batch.batch)
+        logits = model(batch)
         preds.append(logits.argmax(1).cpu())
         trues.append(batch.y.cpu())
     preds = torch.cat(preds).numpy()
@@ -90,10 +113,15 @@ def train_model(
     epochs: int = 80,
     batch_size: int = 16,
     device: torch.device | None = None,
+    model_factory: Optional[Callable[[], nn.Module]] = None,
     verbose: bool = False,
-) -> Tuple[GATGraphClassifier, float]:
+) -> Tuple[nn.Module, float]:
     """
-    Train a GAT classifier with best-on-validation model selection.
+    Train a graph classifier with best-on-validation model selection.
+
+    By default builds the flat GAT from the given hyper-parameters; pass
+    `model_factory` (a zero-arg callable returning a fresh nn.Module) to train a
+    different architecture (e.g. SAGPool, edge-GAT) under the same loop.
 
     Returns the model (restored to its best-on-val weights) and the best
     validation accuracy.
@@ -104,11 +132,13 @@ def train_model(
     val_loader   = DataLoader(val_g,   batch_size=batch_size)
     weights = class_weights(train_g, num_classes, device)
 
-    model = GATGraphClassifier(
-        in_channels=in_channels, hidden_channels=hidden,
-        num_classes=num_classes, heads=heads,
-        num_layers=num_layers, dropout=dropout, pool=pool,
-    ).to(device)
+    if model_factory is None:
+        model_factory = lambda: GATGraphClassifier(
+            in_channels=in_channels, hidden_channels=hidden,
+            num_classes=num_classes, heads=heads,
+            num_layers=num_layers, dropout=dropout, pool=pool,
+        )
+    model = model_factory().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     best_val, best_state, best_epoch = 0.0, None, 0
@@ -118,7 +148,7 @@ def train_model(
         for batch in train_loader:
             batch = batch.to(device)
             optimizer.zero_grad()
-            logits = model(batch.x, batch.edge_index, batch.batch)
+            logits = model(batch)
             loss = F.cross_entropy(logits, batch.y, weight=weights)
             loss.backward()
             optimizer.step()

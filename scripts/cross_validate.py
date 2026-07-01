@@ -32,8 +32,10 @@ from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch_geometric.loader import DataLoader
 
+from models import EdgeGATGraphClassifier, GATGraphClassifier, SAGPoolGraphClassifier
 from models.training import (
     CLASS_NAMES,
+    attach_edge_features,
     evaluate,
     get_device,
     labels_of,
@@ -54,8 +56,12 @@ def main() -> None:
     parser.add_argument("--hidden", type=int, default=64)
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--layers", type=int, default=4, help="number of GAT layers")
+    parser.add_argument("--model", choices=["flat", "sagpool", "edge"], default="flat",
+                        help="architecture: flat GAT, SAGPool, or edge-feature GATv2")
+    parser.add_argument("--pool-ratio", type=float, default=0.5,
+                        help="SAGPool keep-ratio (only for --model sagpool)")
     parser.add_argument("--pool", choices=["mean", "max", "mean+max"],
-                        default="mean", help="graph readout pooling")
+                        default="mean", help="graph readout pooling (flat model)")
     parser.add_argument("--lr", type=float, default=5e-3)
     parser.add_argument("--weight-decay", type=float, default=5e-4)
     parser.add_argument("--dropout", type=float, default=0.5)
@@ -69,15 +75,37 @@ def main() -> None:
     device = get_device() if args.device == "auto" else torch.device(args.device)
     print(f"Device: {device}")
 
-    graphs = load_graphs(args.graphs)
+    # Edge-feature model needs node positions to derive edge_attr; keep `pos`.
+    graphs = load_graphs(args.graphs, strip_pos=(args.model != "edge"))
     labels = labels_of(graphs)
     in_channels = graphs[0].x.shape[1]
     num_classes = int(labels.max()) + 1
     names = CLASS_NAMES[:num_classes]
 
-    print(f"Config: {args.folds}-fold CV | {args.layers} layers | "
-          f"hidden={args.hidden} | heads={args.heads} | pool={args.pool} | "
-          f"epochs={args.epochs}\n")
+    if args.model == "edge":
+        attach_edge_features(graphs)
+
+    # Build a fresh-model factory for the chosen architecture.
+    if args.model == "sagpool":
+        def model_factory():
+            return SAGPoolGraphClassifier(
+                in_channels=in_channels, hidden_channels=args.hidden,
+                num_classes=num_classes, heads=args.heads,
+                ratio=args.pool_ratio, dropout=args.dropout)
+        cfg = f"SAGPool ratio={args.pool_ratio}"
+    elif args.model == "edge":
+        def model_factory():
+            return EdgeGATGraphClassifier(
+                in_channels=in_channels, hidden_channels=args.hidden,
+                num_classes=num_classes, heads=args.heads,
+                num_layers=args.layers, dropout=args.dropout)
+        cfg = "edge-GATv2 (inv-dist + angle)"
+    else:
+        model_factory = None                       # default flat GAT in train_model
+        cfg = f"flat GAT {args.layers}L pool={args.pool}"
+
+    print(f"Config: {args.folds}-fold CV | model={args.model} ({cfg}) | "
+          f"hidden={args.hidden} | heads={args.heads} | epochs={args.epochs}\n")
 
     skf = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=args.seed)
     idx = np.arange(len(graphs))
@@ -102,7 +130,7 @@ def main() -> None:
             dropout=args.dropout, pool=args.pool,
             lr=args.lr, weight_decay=args.weight_decay,
             epochs=args.epochs, batch_size=args.batch_size,
-            device=device, verbose=False,
+            device=device, model_factory=model_factory, verbose=False,
         )
 
         test_loader = DataLoader(test_g, batch_size=args.batch_size)

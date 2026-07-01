@@ -74,7 +74,8 @@ class GATGraphClassifier(nn.Module):
         return torch.cat([global_mean_pool(x, batch),
                           global_max_pool(x, batch)], dim=1)
 
-    def forward(self, x, edge_index, batch) -> torch.Tensor:
+    def forward(self, data) -> torch.Tensor:
+        x, edge_index, batch = data.x, data.edge_index, data.batch
         # Input block (no residual — dimensions change here).
         x = F.elu(self.norms[0](self.convs[0](x, edge_index)))
         x = F.dropout(x, p=self.dropout, training=self.training)
